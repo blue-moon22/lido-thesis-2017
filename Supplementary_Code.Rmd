@@ -1,5 +1,5 @@
 ---
-title: "HMP (Human Microbiome Project) Data Pipeline"
+title: "Supplementary Code"
 output: html_document
 author: Vicky Butt
 ---
@@ -121,10 +121,12 @@ system(order)
 ```
 
 
-### Step 3: Assemble DNA with SPAdes 3.9.0
+### Step 3: Additional filtering by assembly and alignment
 Documentation: http://spades.bioinf.spbau.ru/release3.9.0/manual.html
+Documentation: http://www.htslib.org/doc/samtools.html
 
-```{r spades}
+```{r filter_scaffolds}
+## Assemble reads with SPAdes 3.9.0
 spades <- "/users/k1639482/brc_scratch/SOFTWARE/SPAdes-3.9.0-Linux/bin/spades.py"
 
 parameters <- " -t 24 -m 220  -k 21,33,55 --only-assembler --meta "
@@ -136,28 +138,25 @@ order <- paste(order, parameters,
                " -o ",folder_spades,"/",sample," ",
                sep="")
 system(order)
-```
 
-### Step 4: Additional filter step with Bowtie2 2.2.3
-
-```{r filter_scaffolds}
+## Additional filter step with Bowtie2 2.2.3
 bowtie2 <- "/users/k1639482/brc_scratch/SOFTWARE/bowtie2-2.2.3"
 max_processors <- 32
 
-## Copy scaffold to filtered scaffold folder
+# Copy scaffold to filtered scaffold folder
 order_cp_scaffold <- paste("cp ",folder_spades,"/",sample,"/scaffolds.fasta ",
                            folder_filter_scaffold,"/",sample,"_scaffolds.fasta",
                            sep="")
 system(order_cp_scaffold)
 
-## Generate bowtie2 reference
+# Generate bowtie2 reference
 order_bowtieindex_scaffold <- paste(bowtie2, "/", "bowtie2-build -f ",
                                     folder_filter_scaffold,"/",sample,"_scaffolds.fasta ",
                                     folder_filter_scaffold, "/", sample,"_scaffolds",
                                     sep="")
 system(order_bowtieindex_scaffold)
 
-## Align trimmed/filtered reads to bowtie2 reference
+# Align trimmed/filtered reads to bowtie2 reference
 parameters_BT_go <- paste(" -q -N 1 -p  ",max_processors," -k 1 --fr",
                           " -x ", folder_filter_scaffold,"/",sample,"_scaffolds ",
                           " --end-to-end --phred33 --very-sensitive --no-discordant ",sep="")
@@ -166,15 +165,10 @@ order_bt_scaffold <- paste(bowtie2, "/", "bowtie2 ", parameters_BT_go,
                            " -2 ",folder_work,"/",sample,"_trimmo_trimmed_and_filtered_2.fastq ",
                            " -S ",folder_filter_scaffold,"/",sample,"_scaffold.sam",sep="")
 system(order_bt_scaffold)
-```
 
-### Step 5: Samtools and filter contigs and gene lengths
-Documentation: http://www.htslib.org/doc/samtools.html
-
-```{r samtools_filter}
+## SAMtools
 samtools <- "/opt/apps/bioinformatics/samtools/1.3.1/bin/"
 
-## Samtools
 order_sam_to_bam <- paste(samtools, "samtools view -bS ", 
                           folder_filter_scaffold,"/",sample,"_scaffold.sam ",
                           " > ", folder_filter_scaffold,"/",sample,"_scaffold.bam ",
@@ -225,8 +219,77 @@ writeXStringSet(object_use_filter, paste(folder_filter_scaffold,"/",sample,"_sca
                 compress=FALSE, compression_level=NA, format="fasta")
 ```
 
-### Step 6: Merge all samples in one fastq file
-```{r merge}
+### Step 4: Quality Control
+
+##### Fragments
+```{r eval=FALSE}
+## To run in cluster
+# Number of fragments
+numberOfFragments <- function(file) {
+  number_of_lines <- system(paste0("wc -l ", file), intern=T)
+  number_of_frag <- as.numeric(strsplit(number_of_lines, "/")[[1]][1])/4
+  if(number_of_frag%%1 != 0){
+    stop("Number of lines not divisible by 4. Is the fastq file complete?")
+  }
+  return(number_of_frag)
+}
+
+## Set samples and work directory
+args = commandArgs(trailingOnly=TRUE)
+sample <- as.character(read.table(args[1])[1,1])
+folder_work <- "/users/k1639482/brc_scratch/ORAL_MICROBIOME/HMP/DATA_RAW"
+
+## Number of fragments before trim
+file <- paste0(folder_work, "/", sample, "_1.fastq")
+frag_before_trim <- numberOfFragments(file)
+
+## Number of fragments after trim
+file <- paste0(folder_work, "/", sample, "_trimmo_trimmed_1.fastq")
+frag_after_trim <- numberOfFragments(file)
+
+## Number of fragments after bowtie filter
+file <- paste0(folder_work, "/", sample, "_trimmo_trimmed_and_filtered_1.fastq")
+frag_after_filter <- numberOfFragments(file)
+
+# Save stats
+stats <- c(frag_before_trim, frag_after_trim, frag_after_filter)
+save(stats, file = paste0(folder_work, "/fragment_stats_", sample, ".RData"))
+```
+
+##### Scaffolds
+```{r eval=FALSE}
+## To run in cluster
+# Number of scaffolds
+numberOfScaffolds <- function(file) {
+  number_of_scaffolds <- as.numeric(system(paste0('grep -c "^>" ', file), intern=T))
+  return(number_of_scaffolds)
+}
+
+## Set samples and work directory
+args = commandArgs(trailingOnly=TRUE)
+sample <- as.character(read.table(args[1])[1,1])
+folder_filter_scaffold <- "/users/k1639482/brc_scratch/ORAL_MICROBIOME/HMP/FILTERED_SCAFFOLDS"
+
+## Number of fragments before bowtie filter
+file <- paste0(folder_filter_scaffold, "/", sample, "_scaffolds.fasta")
+scaf_before_filter <- numberOfScaffolds(file)
+
+## Number of fragments after bowtie filter
+file <- paste0(folder_filter_scaffold, "/", sample, "_scaffolds_filtered.fasta")
+scaf_after_filter <- numberOfScaffolds(file)
+
+# Save stats
+stats <- c(scaf_before_filter, scaf_after_filter)
+save(stats, file = paste0(folder_filter_scaffold, "/scaffold_stats_", sample, ".RData"))
+```
+
+### Step 5: Gene Predictions
+Prodigal documentation: https://github.com/hyattpd/prodigal/wiki
+\
+CD-HIT documentation: http://weizhongli-lab.org/lab-wiki/doku.php?id=cd-hit-user-guide
+```{r}
+## Bash for merging files
+
 # #!/bin/bash
 # 
 # #$ -o users/k1639482/brc_scratch/grid_schedular_outputs/sge-out
@@ -236,14 +299,7 @@ writeXStringSet(object_use_filter, paste(folder_filter_scaffold,"/",sample,"_sca
 # #$ -q HighMemLongterm.q,HighMemShortterm.q
 # 
 # cat /users/k1639482/brc_scratch/ORAL_MICROBIOME/HMP/FILTERED_SCAFFOLDS/*_scaffolds_filtered.fasta > /users/k1639482/brc_scratch/ORAL_MICROBIOME/HMP/FILTERED_SCAFFOLDS/merged_scaffolds_filtered.fasta
-```
 
-### Step 7: Identify genes and proteins using Prodigal 2.6.3 and cluster nucleotide sequences using CD-HIT 4.6.6
-Prodigal documentation: https://github.com/hyattpd/prodigal/wiki
-\
-CD-HIT documentation: http://weizhongli-lab.org/lab-wiki/doku.php?id=cd-hit-user-guide
-
-```{r}
 sample <- "merged"
 folder_py <- "/users/k1639482/brc_scratch/SOFTWARE/source_py"
 prodigal <- "/opt/apps/bioinformatics/prodigal/2.6.3/prodigal"
